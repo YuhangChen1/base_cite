@@ -1,0 +1,15 @@
+# node.js
+node_modules
+package.json
+package-lock.json
+
+# Mac OS
+**/.DS_Store
+
+# build
+build
+cmake-build-debug
+cmake-build-debug-ubuntu-2204-arm
+
+# idea
+.idea
