@@ -30,8 +30,8 @@ class Planner {
 private:
     SmManager *sm_manager_;
 
-    bool enable_nestedloop_join = true;
-    bool enable_sortmerge_join = false;
+    bool enable_nestedloop_join = false;
+    bool enable_sortmerge_join = true;
 
 public:
     Planner(SmManager *sm_manager) : sm_manager_(sm_manager) {
@@ -55,6 +55,8 @@ private:
 
     std::shared_ptr<Plan> generate_select_plan(std::shared_ptr<Query> query, Context *context);
 
+    std::shared_ptr<Plan> pop_scan(int *scantbl, const std::string &table, std::vector<std::string> &joined_tables,
+                                   std::vector<std::shared_ptr<Plan> > plans);
 
     // int get_indexNo(std::string tab_name, std::vector<Condition> curr_conds);
     bool get_index_cols(std::string &tab_name, std::vector<Condition> &curr_conds,

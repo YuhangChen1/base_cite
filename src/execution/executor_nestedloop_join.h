@@ -24,12 +24,17 @@ private:
     std::vector<Condition> fed_conds_; // join条件
     std::unique_ptr<RmRecord> rm_record_;
     std::unique_ptr<RmRecord> lhs_rec_;
-    bool is_end_;
+    bool is_right_empty_;
+    bool sort_mode_{false};
+    int last_cmp_;
 
 public:
     NestedLoopJoinExecutor(std::unique_ptr<AbstractExecutor> left, std::unique_ptr<AbstractExecutor> right,
                            std::vector<Condition> conds): left_(std::move(left)), right_(std::move(right)),
                                                           fed_conds_(std::move(conds)) {
+        if (left_->getType() == "SortExecutor" && right_->getType() == "SortExecutor") {
+            sort_mode_ = true;
+        }
         len_ = left_->tupleLen() + right_->tupleLen();
         cols_ = left_->cols();
         auto right_cols = right_->cols();
@@ -37,12 +42,21 @@ public:
             col.offset += left_->tupleLen();
         }
         cols_.insert(cols_.end(), right_cols.begin(), right_cols.end());
-        is_end_ = false;
+        is_right_empty_ = false;
     }
 
     void beginTuple() override {
         left_->beginTuple();
+        // 左表为空时直接返回
+        if (left_->is_end()) {
+            return;
+        }
         right_->beginTuple();
+        // 右表为空时直接返回
+        if (right_->is_end()) {
+            is_right_empty_ = true;
+            return;
+        }
 
         do {
             lhs_rec_ = left_->Next();
@@ -54,6 +68,9 @@ public:
                     memcpy(rm_record_->data, lhs_rec_->data, left_->tupleLen());
                     memcpy(rm_record_->data + left_->tupleLen(), rhs_rec->data, right_->tupleLen());
                     return;
+                }
+                if (sort_mode_ && last_cmp_ < 0) {
+                    break;
                 }
                 right_->nextTuple();
             }
@@ -78,6 +95,9 @@ public:
                     memcpy(rm_record_->data + left_->tupleLen(), rhs_rec->data, right_->tupleLen());
                     return;
                 }
+                if (sort_mode_ && last_cmp_ < 0) {
+                    break;
+                }
                 right_->nextTuple();
             }
             left_->nextTuple();
@@ -95,7 +115,7 @@ public:
 
     Rid &rid() override { return _abstract_rid; }
 
-    bool is_end() const { return left_->is_end(); }
+    bool is_end() const { return left_->is_end() || is_right_empty_; }
 
     const std::vector<ColMeta> &cols() const override { return cols_; }
 
@@ -145,14 +165,14 @@ public:
             throw IncompatibleTypeError(coltype2str(lhs_col_meta->type), coltype2str(rhs_type));
         }
 
-        int cmp = compare(lhs_data, rhs_data, lhs_col_meta->len, lhs_col_meta->type);
+        last_cmp_ = compare(lhs_data, rhs_data, lhs_col_meta->len, lhs_col_meta->type);
         switch (cond.op) {
-            case OP_EQ: return cmp == 0;
-            case OP_NE: return cmp != 0;
-            case OP_LT: return cmp < 0;
-            case OP_GT: return cmp > 0;
-            case OP_LE: return cmp <= 0;
-            case OP_GE: return cmp >= 0;
+            case OP_EQ: return last_cmp_ == 0;
+            case OP_NE: return last_cmp_ != 0;
+            case OP_LT: return last_cmp_ < 0;
+            case OP_GT: return last_cmp_ > 0;
+            case OP_LE: return last_cmp_ <= 0;
+            case OP_GE: return last_cmp_ >= 0;
             default:
                 throw InternalError("Unexpected op type！");
         }

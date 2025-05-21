@@ -16,6 +16,7 @@ See the Mulan PSL v2 for more details. */
 #include "optimizer/plan.h"
 #include "execution/executor_abstract.h"
 #include "execution/executor_nestedloop_join.h"
+#include "execution/executor_sortmerge_join.h"
 #include "execution/executor_projection.h"
 #include "execution/executor_seq_scan.h"
 #include "execution/executor_aggregate.h"
@@ -23,7 +24,7 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_update.h"
 #include "execution/executor_insert.h"
 #include "execution/executor_delete.h"
-#include "execution/execution_sort.h"
+#include "execution/executor_sort.h"
 #include "common/common.h"
 
 typedef enum portalTag {
@@ -157,7 +158,6 @@ public:
     void drop() {
     }
 
-
     std::unique_ptr<AbstractExecutor> convert_plan_executor(std::shared_ptr<Plan> plan, Context *context) {
         if (auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)) {
             return std::make_unique<ProjectionExecutor>(convert_plan_executor(x->subplan_, context),
@@ -178,9 +178,13 @@ public:
         if (auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
             std::unique_ptr<AbstractExecutor> left = convert_plan_executor(x->left_, context);
             std::unique_ptr<AbstractExecutor> right = convert_plan_executor(x->right_, context);
-            return std::make_unique<NestedLoopJoinExecutor>(
-                std::move(left),
-                std::move(right), std::move(x->conds_));
+            if (x->tag == T_NestLoop) {
+                return std::make_unique<NestedLoopJoinExecutor>(
+                    std::move(left),
+                    std::move(right), std::move(x->conds_));
+            }
+            return std::make_unique<SortMergeJoinExecutor>(std::move(left),
+                    std::move(right), std::move(x->conds_));
         }
         if (auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {
             return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context),
