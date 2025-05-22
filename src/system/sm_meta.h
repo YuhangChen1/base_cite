@@ -72,8 +72,9 @@ struct TabMeta {
     std::string name; // 表名称
     std::vector<ColMeta> cols; // 表包含的字段
     std::unordered_map<std::string, IndexMeta> indexes; // 表上建立的索引 索引名 -> 索引元信息
+    int record_count; // Stores the number of records in the table
 
-    TabMeta() {
+    TabMeta() : record_count(0) { // Initialize record_count to 0
     }
 
     TabMeta(const TabMeta &other) {
@@ -155,6 +156,7 @@ struct TabMeta {
             os << index_name << '\n';
             os << index << "\n";
         }
+        os << tab.record_count << "\n"; // Serialize record_count
         return os;
     }
 
@@ -173,6 +175,17 @@ struct TabMeta {
             is >> index_name;
             is >> index;
             tab.indexes.emplace(index_name, index);
+        }
+        // Attempt to read record_count. If the stream is bad (e.g., old format file),
+        // record_count will retain its default initialized value (0 from constructor).
+        // This provides basic backward compatibility for reading older metadata files.
+        if (!(is >> tab.record_count)) {
+            // If read fails (e.g. end of stream for old format), record_count remains 0.
+            // Clear error flags if any, to allow further operations if needed,
+            // though for this specific deserialization, we are at the end for this object.
+            if (is.eof()) { // If it was EOF, that's "expected" for old files.
+                is.clear(is.rdstate() & ~std::ios_base::failbit); // Clear failbit if only eof caused it.
+            }
         }
         return is;
     }

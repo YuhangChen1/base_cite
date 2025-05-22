@@ -83,4 +83,8 @@ public:
     void drop_index(const std::string &tab_name, const std::vector<std::string> &col_names, Context *context);
 
     void drop_index(const std::string &tab_name, const std::vector<ColMeta> &col_names, Context *context);
+
+    // Methods for table cardinality
+    int get_table_cardinality(const std::string& tab_name) const;
+    void update_table_record_count(const std::string& tab_name, int count);
 };

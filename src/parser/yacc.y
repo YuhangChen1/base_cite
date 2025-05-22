@@ -27,6 +27,8 @@ COUNT MAX MIN SUM AS GROUP HAVING
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 
+// keywords
+%token K_EXPLAIN
 // type-specific tokens
 %token <sv_str> IDENTIFIER VALUE_STRING
 %token <sv_int> VALUE_INT
@@ -87,6 +89,17 @@ stmt:
     |   dml
     |   txnStmt
     |   setStmt
+    |   K_EXPLAIN stmt %prec ';' // Use %prec to resolve shift/reduce with stmt ;
+    {
+        // Assuming $2 (stmt) correctly populates a ->sv_node or similar
+        // that can be treated as a generic TreeNode for ExplainStmt.
+        // The action for 'stmt ;' already sets parse_tree.
+        // Here, we are creating an ExplainStmt node.
+        // If stmt rule already creates a specific node type (e.g. SelectStmt),
+        // $2.sv_node should hold it.
+        // The top-level 'start: stmt ;' rule will then assign this ExplainStmt to parse_tree.
+        $$ = std::make_shared<ast::ExplainStmt>($2); 
+    }
     ;
 
 txnStmt:
@@ -164,6 +177,8 @@ dml:
     }
     |   SELECT select_list FROM tableList optWhereClause group_by_clause having_clauses opt_order_clause
     {
+        // This action constructs a SelectStmt and assigns it to $$.
+        // When used in K_EXPLAIN stmt, $2 from K_EXPLAIN stmt will be this SelectStmt.
         $$ = std::make_shared<SelectStmt>($2, $4, $5, $6, $7, $8);
     }
     ;

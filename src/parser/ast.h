@@ -318,6 +318,13 @@ namespace ast {
         }
     };
 
+    struct ExplainStmt : public TreeNode {
+        std::shared_ptr<ast::TreeNode> query_stmt;
+
+        ExplainStmt(std::shared_ptr<ast::TreeNode> query_stmt_) : query_stmt(std::move(query_stmt_)) {
+        }
+    };
+
     // Semantic value
     struct SemValue {
         int sv_int;
@@ -361,6 +368,8 @@ namespace ast {
         std::shared_ptr<OrderBy> sv_orderby;
 
         SetKnobType sv_setKnobType;
+
+        std::shared_ptr<ast::ExplainStmt> sv_explain_stmt;
     };
 
     extern std::shared_ptr<ast::TreeNode> parse_tree;

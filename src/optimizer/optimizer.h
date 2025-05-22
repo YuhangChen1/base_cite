@@ -32,6 +32,28 @@ public:
     }
 
     std::shared_ptr<Plan> plan_query(std::shared_ptr<Query> query, Context *context) {
+        if (auto explain_stmt = std::dynamic_pointer_cast<ast::ExplainStmt>(query->parse)) {
+            // Handle EXPLAIN statement
+            auto inner_query_ast = explain_stmt->query_stmt;
+
+            // Create a Query object for the statement to be explained
+            // The Query object typically holds the AST and other derived information.
+            // For the inner query of EXPLAIN, we primarily need to pass its AST.
+            // The Planner's do_planner method is expected to perform any necessary
+            // analysis on this AST (e.g., populating table names, conditions)
+            // if it hasn't been done already for the inner_query_ast.
+            std::shared_ptr<Query> inner_query_obj = std::make_shared<Query>();
+            inner_query_obj->parse = inner_query_ast;
+            // If the original query object (wrapper for EXPLAIN) had other relevant info
+            // that should apply to the inner query (like transaction context),
+            // it might need to be copied or passed along. For now, a minimal Query obj.
+
+            // Get the optimized plan for the inner query
+            std::shared_ptr<Plan> optimized_inner_plan = planner_->do_planner(inner_query_obj, context);
+
+            // Wrap the inner plan in an ExplainPlan
+            return std::make_shared<ExplainPlan>(optimized_inner_plan);
+        }
         if (auto x = std::dynamic_pointer_cast<ast::Help>(query->parse)) {
             // help;
             return std::make_shared<OtherPlan>(T_Help, std::string());

@@ -341,6 +341,36 @@ void SmManager::create_index(const std::string &tab_name, const std::vector<std:
     flush_meta();
 }
 
+// Add new methods for table cardinality
+int SmManager::get_table_cardinality(const std::string& tab_name) const {
+    // Check if the database is open
+    if (db_.name_.empty()) {
+        throw DatabaseNotOpenError(db_.name_); // Or a more general error
+    }
+    // Find the table in the current database metadata
+    auto it = db_.tabs_.find(tab_name);
+    if (it == db_.tabs_.end()) {
+        throw TableNotFoundError(tab_name);
+    }
+    return it->second.record_count;
+}
+
+void SmManager::update_table_record_count(const std::string& tab_name, int count) {
+    // Check if the database is open
+    if (db_.name_.empty()) {
+        throw DatabaseNotOpenError(db_.name_); // Or a more general error
+    }
+    // Find the table and update its record count
+    auto it = db_.tabs_.find(tab_name);
+    if (it == db_.tabs_.end()) {
+        throw TableNotFoundError(tab_name);
+    }
+    it->second.record_count = count;
+
+    // Persist the metadata changes
+    flush_meta();
+}
+
 /**
  * @description: 删除索引
  * @param {string&} tab_name 表名称

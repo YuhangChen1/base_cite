@@ -134,10 +134,43 @@ void *client_handler(void *sock_fd) {
                     pthread_mutex_unlock(buffer_mutex);
                     // 优化器
                     std::shared_ptr<Plan> plan = optimizer->plan_query(query, context);
-                    // portal
-                    std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
-                    portal->run(portalStmt, ql_manager.get(), &txn_id, context);
-                    portal->drop();
+
+                    if (plan != nullptr) {
+                        if (plan->tag == T_Explain) {
+                            std::string explain_output = plan->toString(0);
+                            // BUFFER_LENGTH is used for data_send, so it's our MAX_OUTPUT_BUFFER_SIZE
+                            size_t available_buffer = BUFFER_LENGTH - (*context->offset_); 
+                            size_t output_len = explain_output.length();
+
+                            if (output_len < available_buffer) {
+                                memcpy(context->data_send_ + (*context->offset_), explain_output.c_str(), output_len);
+                                (*context->offset_) += output_len;
+                                // Ensure null termination if the output string itself doesn't end with \0 or if we want to be safe
+                                if ((*context->offset_) < BUFFER_LENGTH) {
+                                     context->data_send_[*context->offset_] = '\0'; // Null-terminate, though offset points to next char
+                                } else {
+                                     context->data_send_[BUFFER_LENGTH - 1] = '\0'; // Maxed out buffer
+                                }
+
+                            } else {
+                                // Output may be truncated
+                                memcpy(context->data_send_ + (*context->offset_), explain_output.c_str(), available_buffer - 1);
+                                (*context->offset_) += (available_buffer - 1);
+                                context->data_send_[*context->offset_] = '\0'; // Ensure null-termination
+                                // Optionally, set a flag like context->ellipsis_ = true; if the system uses one.
+                            }
+                        } else {
+                            // portal (existing logic for non-EXPLAIN plans)
+                            std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
+                            portal->run(portalStmt, ql_manager.get(), &txn_id, context);
+                            portal->drop();
+                        }
+                    } else {
+                        // Handle case where plan is nullptr, if necessary (e.g., log error)
+                        // This case might be handled by existing error handling or be an assertion failure.
+                        // For now, if plan is null, no specific action here, it will likely result in empty output
+                        // or be caught by subsequent error checks or prior error throws.
+                    }
                 } catch (TransactionAbortException &e) {
                     // 事务需要回滚，需要把abort信息返回给客户端并写入output.txt文件中
                     std::string str = "abort\n";

@@ -21,12 +21,51 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_update.h"
 #include "index/ix.h"
 #include "record_printer.h"
+#include <set> // Required for std::set in classify_conditions
+#include <map> // Required for std::map in classify_conditions
+#include <algorithm> // Required for std::find
+
+namespace { // Anonymous namespace for helpers
+
+// Helper to classify conditions into single-table predicates and join predicates.
+void classify_conditions(
+    const std::vector<Condition>& all_query_conds,
+    const std::vector<std::string>& table_names_in_query,
+    std::map<std::string, std::vector<Condition>>& single_table_predicates_map,
+    std::vector<Condition>& join_predicates) {
+
+    for (const auto& cond : all_query_conds) {
+        std::set<std::string> involved_tables_in_cond;
+        
+        // Check lhs_col.tab_name
+        if (!cond.lhs_col.tab_name.empty() &&
+            std::find(table_names_in_query.begin(), table_names_in_query.end(), cond.lhs_col.tab_name) != table_names_in_query.end()) {
+            involved_tables_in_cond.insert(cond.lhs_col.tab_name);
+        }
+
+        // Check rhs_col.tab_name if it's not a value
+        if (!cond.is_rhs_val) {
+            if (!cond.rhs_col.tab_name.empty() &&
+                std::find(table_names_in_query.begin(), table_names_in_query.end(), cond.rhs_col.tab_name) != table_names_in_query.end()) {
+                involved_tables_in_cond.insert(cond.rhs_col.tab_name);
+            }
+        }
+        
+        if (involved_tables_in_cond.size() == 1) {
+            single_table_predicates_map[*involved_tables_in_cond.begin()].push_back(cond);
+        } else { // size 0 or > 1
+            join_predicates.push_back(cond);
+        }
+    }
+}
+
+} // end anonymous namespace
 
 // 目前的索引匹配规则为：完全匹配索引字段，且全部为单点查询，不会自动调整where条件的顺序
 // 支持自动调整where顺序，最长前缀匹配
 bool Planner::get_index_cols(std::string &tab_name, std::vector<Condition> &curr_conds,
                              std::vector<std::string> &index_col_names) {
-    // index_col_names.clear();
+    // index_col_names.clear(); // Caller should ensure this if needed.
     // for (auto &cond: curr_conds) {
     //     if (cond.is_rhs_val && cond.op == OP_EQ && cond.lhs_col.tab_name == tab_name)
     //         index_col_names.push_back(cond.lhs_col.col_name);
@@ -246,53 +285,91 @@ std::shared_ptr<Plan> Planner::physical_optimization(std::shared_ptr<Query> quer
 
 std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query) {
     auto x = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
-    std::vector<std::string> tables = query->tables;
-    // // Scan table , 生成表算子列表tab_nodes
-    std::vector<std::shared_ptr<Plan> > table_scan_executors(tables.size());
-    for (size_t i = 0; i < tables.size(); i++) {
-        // 检查表上的谓词，连接谓词要后面查
-        auto curr_conds = pop_conds(query->conds, tables[i]);
-        // int index_no = get_indexNo(tables[i], curr_conds);
+    std::vector<std::string> tables_in_query = query->tables;
+
+    // 1. Separate conditions: single-table vs join predicates
+    std::map<std::string, std::vector<Condition>> single_table_predicates_map;
+    std::vector<Condition> join_predicates;
+    classify_conditions(query->conds, tables_in_query, single_table_predicates_map, join_predicates);
+    
+    // query->conds will now store only join predicates for the join construction phase
+    query->conds = join_predicates;
+
+    // 2. Create base (Scan or FilteredScan) plans for each table
+    std::vector<std::shared_ptr<Plan>> table_plans(tables_in_query.size()); // Use table_plans for clarity
+    for (size_t i = 0; i < tables_in_query.size(); i++) {
+        const std::string& current_table_name = tables_in_query[i];
+        std::vector<Condition> table_specific_conditions; 
+        if (single_table_predicates_map.count(current_table_name)) {
+            table_specific_conditions = single_table_predicates_map[current_table_name];
+        }
+
         std::vector<std::string> index_col_names;
-        bool index_exist = get_index_cols(tables[i], curr_conds, index_col_names);
-        if (index_exist == false) {
-            // 该表没有索引
-            index_col_names.clear();
-            table_scan_executors[i] =
-                    std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tables[i], curr_conds, index_col_names);
-        } else {
-            // 存在索引
-            // 且在排序列上，不需要排序
-            if (x->has_sort) {
-                for (auto &cond: curr_conds) {
-                    if (cond.lhs_col == query->sort_bys || cond.rhs_col == query->sort_bys) {
-                        x->has_sort = false;
+        // get_index_cols might modify table_specific_conditions (e.g., reorder them for index matching)
+        bool index_exist = get_index_cols(tables_in_query[i], table_specific_conditions, index_col_names);
+        
+        std::shared_ptr<Plan> base_scan_plan; 
+        if (index_exist) {
+            // IndexScan is given all single-table conditions that might apply to it.
+            // Its executor is responsible for using relevant ones for index access
+            // and applying the rest as post-scan filters if necessary.
+            base_scan_plan = std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, current_table_name, table_specific_conditions, index_col_names);
+            
+            // Simplified sort avoidance logic (may need more robust checks)
+            if (x && x->has_sort) { 
+                 for (auto &cond : table_specific_conditions) { 
+                    if ( (cond.lhs_col.tab_name == query->sort_bys.tab_name && cond.lhs_col.col_name == query->sort_bys.col_name) ||
+                         (!cond.is_rhs_val && cond.rhs_col.tab_name == query->sort_bys.tab_name && cond.rhs_col.col_name == query->sort_bys.col_name) ) {
+                        // x->has_sort = false; // Potentially avoid sort if index provides order
                         break;
                     }
                 }
             }
-            table_scan_executors[i] =
-                    std::make_shared<ScanPlan>(T_IndexScan, sm_manager_, tables[i], curr_conds, index_col_names);
+        } else {
+            // SeqScan gets no conditions if a FilterPlan will be added on top.
+            // If no FilterPlan (no single-table conditions), then SeqScan could take conditions.
+            // For consistency with predicate pushdown, FilterPlan handles these conditions.
+            base_scan_plan = std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, current_table_name, std::vector<Condition>(), index_col_names);
         }
+
+        // Add FilterPlan if there are any single-table conditions for this table.
+        std::shared_ptr<Plan> plan_after_filter = base_scan_plan;
+        if (!table_specific_conditions.empty()) {
+            plan_after_filter = std::make_shared<FilterPlan>(base_scan_plan, table_specific_conditions);
+        }
+        table_plans[i] = plan_after_filter;
     }
-    // 只有一个表，不需要join。
-    if (tables.size() == 1) {
-        return table_scan_executors[0];
+
+    // 3. Handle single table query case
+    if (tables_in_query.size() == 1) {
+        return table_plans[0];
     }
-    // 获取where条件
-    auto conds = std::move(query->conds);
+    
+    // 4. Join processing using the (now join-only) query->conds
+    auto conds = std::move(query->conds); // These are join_predicates
     std::shared_ptr<Plan> table_join_executors;
 
-    int scantbl[tables.size()];
-    for (size_t i = 0; i < tables.size(); i++) {
+    int scantbl[tables_in_query.size()];
+    for (size_t i = 0; i < tables_in_query.size(); i++) {
         scantbl[i] = -1;
     }
-    // 假设在ast中已经添加了jointree，这里需要修改的逻辑是，先处理jointree，然后再考虑剩下的部分
-    if (conds.size() >= 1) {
-        // 有连接条件
+    
+    // Helper lambda to get a base plan for a table and mark it as used
+    auto get_base_plan_for_join = 
+        [&](const std::string& table_name, std::vector<std::string>& joined_list) -> std::shared_ptr<Plan> {
+        for (size_t i = 0; i < tables_in_query.size(); ++i) {
+            if (tables_in_query[i] == table_name && scantbl[i] == -1) {
+                scantbl[i] = 1; 
+                joined_list.push_back(table_name);
+                return table_plans[i]; // Use the (Filter(Scan)) plan
+            }
+        }
+        return nullptr; 
+    };
 
-        // 根据连接条件，生成第一层join
-        std::vector<std::string> joined_tables(tables.size());
+    // Build join tree (greedy approach)
+    if (!conds.empty()) {
+        std::vector<std::string> joined_tables_list; 
         auto it = conds.begin();
         while (it != conds.end()) {
             std::shared_ptr<Plan> left, right;
