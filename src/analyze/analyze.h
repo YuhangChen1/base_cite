@@ -50,6 +50,9 @@ public:
     //insert 的values值
     std::vector<Value> values;
 
+    bool is_explain_ = false;
+    std::shared_ptr<ast::TreeNode> explained_stmt_ = nullptr; // To store the actual statement being explained
+
     Query() {
     }
 };

@@ -94,6 +94,7 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
 "AS" { return AS; }
 "GROUP" { return GROUP; }
 "HAVING" { return HAVING; }
+"EXPLAIN" { return EXPLAIN_KEYWORD; }
 "TRUE" { 
     yylval->sv_bool = true;
     return VALUE_BOOL; 

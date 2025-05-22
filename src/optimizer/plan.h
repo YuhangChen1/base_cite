@@ -45,6 +45,7 @@ typedef enum PlanTag {
     T_SortMerge, // sort merge join
     T_Sort,
     T_Projection,
+    T_Filter, // Added Filter Tag
     T_Aggregate
 } PlanTag;
 
@@ -58,28 +59,72 @@ public:
 
 class ScanPlan : public Plan {
 public:
-    ScanPlan(PlanTag tag, SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds,
-             std::vector<std::string> index_col_names) {
-        Plan::tag = tag;
+    // Constructor for SeqScan (T_SeqScan)
+    ScanPlan(PlanTag tag, SmManager *sm_manager, std::string tab_name) {
+        Plan::tag = tag; // Should be T_SeqScan
         tab_name_ = std::move(tab_name);
-        conds_ = std::move(conds);
-        TabMeta &tab = sm_manager->db_.get_table(tab_name_);
-        cols_ = tab.cols;
-        len_ = cols_.back().offset + cols_.back().len;
-        fed_conds_ = conds_;
+        // Initialize cols_ and len_ from sm_manager and tab_name_
+        if (sm_manager) { // Basic safety check
+             try {
+                TabMeta &tab = sm_manager->db_.get_table(tab_name_);
+                cols_ = tab.cols;
+                if (!cols_.empty()) {
+                    len_ = cols_.back().offset + cols_.back().len;
+                } else {
+                    len_ = 0;
+                }
+             } catch (const TableNotFoundError& e) {
+                // Or rethrow, or handle as an error state
+                len_ = 0; 
+             }
+        } else {
+            len_ = 0; // Or throw error
+        }
+        // index_col_names_ can be empty for SeqScan
+    }
+
+    // Constructor for IndexScan (T_IndexScan)
+    ScanPlan(PlanTag tag, SmManager *sm_manager, std::string tab_name, std::vector<std::string> index_col_names) {
+        Plan::tag = tag; // Should be T_IndexScan
+        tab_name_ = std::move(tab_name);
         index_col_names_ = std::move(index_col_names);
+        // Initialize cols_ and len_ from sm_manager and tab_name_
+         if (sm_manager) { // Basic safety check
+             try {
+                TabMeta &tab = sm_manager->db_.get_table(tab_name_);
+                cols_ = tab.cols;
+                if (!cols_.empty()) {
+                    len_ = cols_.back().offset + cols_.back().len;
+                } else {
+                    len_ = 0;
+                }
+             } catch (const TableNotFoundError& e) {
+                len_ = 0;
+             }
+        } else {
+            len_ = 0;
+        }
     }
 
-    ~ScanPlan() {
-    }
+    ~ScanPlan() = default; // Use default destructor
 
-    // 以下变量同ScanExecutor中的变量
     std::string tab_name_;
-    std::vector<ColMeta> cols_;
-    std::vector<Condition> conds_;
-    size_t len_;
-    std::vector<Condition> fed_conds_;
-    std::vector<std::string> index_col_names_;
+    std::vector<ColMeta> cols_; // Column metadata for the table
+    size_t len_; // Length of the tuple
+    std::vector<std::string> index_col_names_; // For index scans
+};
+
+class FilterPlan : public Plan {
+public:
+    std::shared_ptr<Plan> child_; // The input plan node
+    std::vector<Condition> conditions_; // List of conditions to apply
+
+    FilterPlan(std::shared_ptr<Plan> child, std::vector<Condition> conditions)
+        : child_(std::move(child)), conditions_(std::move(conditions)) {
+        Plan::tag = T_Filter;
+    }
+
+    ~FilterPlan() = default;
 };
 
 class JoinPlan : public Plan {

@@ -23,6 +23,7 @@ See the Mulan PSL v2 for more details. */
 #include "optimizer/planner.h"
 #include "portal.h"
 #include "analyze/analyze.h"
+#include "optimizer/plan_printer.h" // Added for PlanPrinter
 
 #define SOCK_PORT 8765
 #define MAX_CONN_LIMIT 8
@@ -132,12 +133,29 @@ void *client_handler(void *sock_fd) {
                     yy_delete_buffer(buf);
                     finish_analyze = true;
                     pthread_mutex_unlock(buffer_mutex);
-                    // 优化器
-                    std::shared_ptr<Plan> plan = optimizer->plan_query(query, context);
-                    // portal
-                    std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
-                    portal->run(portalStmt, ql_manager.get(), &txn_id, context);
-                    portal->drop();
+                    
+                    std::shared_ptr<Plan> plan = optimizer->plan_query(query, context); // Generate plan regardless
+
+                    if (query->is_explain_) {
+                        std::string explain_output = PlanPrinter::print(plan);
+                        
+                        if (explain_output.length() >= BUFFER_LENGTH) {
+                            // Handle potential buffer overflow if plan is too large
+                            const char* err_msg = "EXPLAIN output too large for buffer.\n";
+                            memcpy(data_send, err_msg, strlen(err_msg) + 1);
+                            offset = strlen(err_msg);
+                        } else {
+                            memcpy(data_send, explain_output.c_str(), explain_output.length() + 1); // +1 for null terminator
+                            offset = explain_output.length();
+                        }
+                        // No execution, so no commit/abort logic here for the explained query itself
+                        // No portal usage needed for EXPLAIN
+                    } else {
+                        // Normal execution path
+                        std::shared_ptr<PortalStmt> portalStmt = portal->start(plan, context);
+                        portal->run(portalStmt, ql_manager.get(), &txn_id, context);
+                        portal->drop();
+                    }
                 } catch (TransactionAbortException &e) {
                     // 事务需要回滚，需要把abort信息返回给客户端并写入output.txt文件中
                     std::string str = "abort\n";

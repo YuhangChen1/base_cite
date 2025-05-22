@@ -23,7 +23,7 @@ using namespace ast;
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
 WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE
-COUNT MAX MIN SUM AS GROUP HAVING
+COUNT MAX MIN SUM AS GROUP HAVING EXPLAIN_KEYWORD
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 
@@ -34,7 +34,7 @@ COUNT MAX MIN SUM AS GROUP HAVING
 %token <sv_bool> VALUE_BOOL
 
 // specify types for non-terminal symbol
-%type <sv_node> stmt dbStmt ddl dml txnStmt setStmt
+%type <sv_node> stmt dbStmt ddl dml txnStmt setStmt explainable_stmt
 %type <sv_field> field
 %type <sv_fields> fieldList
 %type <sv_type_len> type
@@ -79,6 +79,11 @@ start:
         parse_tree = nullptr;
         YYACCEPT;
     }
+    |   EXPLAIN_KEYWORD explainable_stmt ';'
+    {
+        parse_tree = std::make_shared<ast::ExplainStmt>($2);
+        YYACCEPT;
+    }
     ;
 
 stmt:
@@ -87,6 +92,15 @@ stmt:
     |   dml
     |   txnStmt
     |   setStmt
+    ;
+
+explainable_stmt:
+        dml
+    {
+        $$ = $1;
+    }
+    // Add other explainable statements here, e.g.
+    // | ddl_stmt  { $$ = $1; } // If you want to explain DDL
     ;
 
 txnStmt:

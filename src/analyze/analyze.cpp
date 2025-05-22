@@ -17,7 +17,19 @@ See the Mulan PSL v2 for more details. */
  */
 std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse) {
     std::shared_ptr<Query> query = std::make_shared<Query>();
-    if (auto x = std::dynamic_pointer_cast<ast::SelectStmt>(parse)) {
+    std::shared_ptr<ast::TreeNode> actual_parse_node = parse; // Node to be actually analyzed
+
+    if (auto explain_stmt = std::dynamic_pointer_cast<ast::ExplainStmt>(parse)) {
+        query->is_explain_ = true;
+        query->explained_stmt_ = explain_stmt->query_stmt;
+        actual_parse_node = explain_stmt->query_stmt; // Analyze the underlying statement
+    }
+
+    query->parse = actual_parse_node; // Store the actual statement's AST for planner
+
+    // The rest of the existing do_analyze logic, using 'actual_parse_node' instead of 'parse'
+    // For example:
+    if (auto x = std::dynamic_pointer_cast<ast::SelectStmt>(actual_parse_node)) {
         // 处理表名
         query->tables = std::move(x->tabs);
         /** TODO: 检查表是否存在 */
@@ -141,7 +153,7 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         // 推断表名和检查左右类型是否匹配
         check_clause(query->tables, query->conds);
         check_clause(query->tables, query->havings);
-    } else if (auto x = std::dynamic_pointer_cast<ast::UpdateStmt>(parse)) {
+    } else if (auto x = std::dynamic_pointer_cast<ast::UpdateStmt>(actual_parse_node)) {
         /** TODO: */
         // 构造set_clauses
         for (auto &set: x->set_clauses) {
@@ -168,19 +180,25 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         // 处理where条件
         get_clause(x->conds, query->conds);
         check_clause({x->tab_name}, query->conds);
-    } else if (auto x = std::dynamic_pointer_cast<ast::DeleteStmt>(parse)) {
+    } else if (auto x = std::dynamic_pointer_cast<ast::DeleteStmt>(actual_parse_node)) {
         // 处理where条件
         get_clause(x->conds, query->conds);
         check_clause({x->tab_name}, query->conds);
-    } else if (auto x = std::dynamic_pointer_cast<ast::InsertStmt>(parse)) {
+    } else if (auto x = std::dynamic_pointer_cast<ast::InsertStmt>(actual_parse_node)) {
         // 处理insert 的values值
         for (auto &sv_val: x->vals) {
             query->values.emplace_back(convert_sv_value(sv_val));
         }
     } else {
-        // do nothing
+        // do nothing, other statements (like CreateTable, DropTable, etc.) might not need specific handling here
+        // or they are handled by the fact that query->parse is already set to actual_parse_node.
+        // If query->parse was set to the original 'parse' (the ExplainStmt itself), 
+        // then other parts of the system (like Planner/Executor) would need to handle ExplainStmt.
+        // But since we set query->parse to actual_parse_node, they will see the underlying statement.
     }
-    query->parse = std::move(parse);
+    // query->parse was already set at the beginning of the function based on whether it's an EXPLAIN statement or not.
+    // If it was an EXPLAIN, query->parse points to the explained statement. Otherwise, it points to the original statement.
+    // The original line "query->parse = std::move(parse);" is removed because actual_parse_node is now used.
     return query;
 }
 

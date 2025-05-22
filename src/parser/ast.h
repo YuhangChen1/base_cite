@@ -318,6 +318,12 @@ namespace ast {
         }
     };
 
+    struct ExplainStmt : public TreeNode {
+        std::shared_ptr<TreeNode> query_stmt; // The statement to be explained
+
+        ExplainStmt(std::shared_ptr<TreeNode> query_stmt_) : query_stmt(std::move(query_stmt_)) {}
+    };
+
     // Semantic value
     struct SemValue {
         int sv_int;
