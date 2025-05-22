@@ -45,7 +45,9 @@ typedef enum PlanTag {
     T_SortMerge, // sort merge join
     T_Sort,
     T_Projection,
-    T_Aggregate
+    T_Aggregate,
+    T_CreateStaticCheckpoint,
+    T_Load
 } PlanTag;
 
 // 查询执行计划
@@ -59,7 +61,7 @@ public:
 class ScanPlan : public Plan {
 public:
     ScanPlan(PlanTag tag, SmManager *sm_manager, std::string tab_name, std::vector<Condition> conds,
-             std::vector<std::string> index_col_names) {
+             std::vector<std::string> index_col_names, bool is_sub_query = false) {
         Plan::tag = tag;
         tab_name_ = std::move(tab_name);
         conds_ = std::move(conds);
@@ -161,6 +163,21 @@ public:
     std::vector<Condition> havings_;
 };
 
+// load 语句，用于数据载入
+class LoadPlan : public Plan {
+public:
+    LoadPlan(PlanTag tag, std::string &filename, std::string &tab_name) {
+        Plan::tag = tag;
+        filename_ = std::move(filename);
+        tab_name_ = std::move(tab_name);
+    }
+
+    ~LoadPlan() override = default;
+
+    std::string filename_;
+    std::string tab_name_;
+};
+
 // dml语句，包括insert; delete; update; select语句　
 class DMLPlan : public Plan {
 public:
@@ -228,6 +245,17 @@ public:
 
     ast::SetKnobType set_knob_type_;
     bool bool_value_;
+};
+
+// 静态检查点生成计划
+class StaticCheckpointPlan : public Plan {
+public:
+    StaticCheckpointPlan(PlanTag tag) {
+        Plan::tag = tag;
+    }
+
+    ~StaticCheckpointPlan() {
+    }
 };
 
 class plannerInfo {

@@ -68,8 +68,22 @@ namespace ast {
                 {SV_OP_GT, ">"},
                 {SV_OP_LE, "<="},
                 {SV_OP_GE, ">="},
+                {SV_OP_IN, "IN"}
             };
             return m.at(op);
+        }
+
+        static std::string knobType2str(SetKnobType type) {
+            static std::map<SetKnobType, std::string> m{
+                {EnableNestLoop, "EnableNestLoop"},
+                {EnableSortMerge, "EnableSortMerge"},
+                {EnableOutputFile, "EnableOutputFile"}
+            };
+            return m.at(type);
+        }
+
+        static std::string boolType2str(bool type) {
+            return type ? "true" : "false";
         }
 
         template<typename T>
@@ -145,7 +159,11 @@ namespace ast {
                 std::cout << "BINARY_EXPR\n";
                 print_node(x->lhs, offset);
                 print_val(op2str(x->op), offset);
-                print_node(x->rhs, offset);
+                if (x->rhs) {
+                    print_node(x->rhs, offset);
+                } else {
+                    print_node_list(x->rhs_list, offset);
+                }
             } else if (auto x = std::dynamic_pointer_cast<BoundExpr>(node)) {
                 std::cout << "BOUND_EXPR\n";
                 print_val(aggType2str(x->type), offset);
@@ -156,6 +174,14 @@ namespace ast {
                 print_node(x->lhs, offset);
                 print_val(op2str(x->op), offset);
                 print_node(x->rhs, offset);
+            } else if (auto x = std::dynamic_pointer_cast<LoadStmt>(node)) {
+                std::cout << "LOAD\n";
+                print_val(x->file_name, offset);
+                print_val(x->table_name, offset);
+            } else if (auto x = std::dynamic_pointer_cast<SetStmt>(node)) {
+                std::cout << "SET_KNOB\n";
+                print_val(knobType2str(x->set_knob_type_), offset);
+                print_val(boolType2str(x->bool_val_), offset);
             } else if (auto x = std::dynamic_pointer_cast<InsertStmt>(node)) {
                 std::cout << "INSERT\n";
                 print_val(x->tab_name, offset);

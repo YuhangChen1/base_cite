@@ -56,6 +56,8 @@ public:
 
     IxManager *get_ix_manager() { return ix_manager_; }
 
+    DiskManager *get_disk_manager() { return disk_manager_; }
+
     bool is_dir(const std::string &db_name);
 
     void create_db(const std::string &db_name);
@@ -78,9 +80,11 @@ public:
 
     void drop_table(const std::string &tab_name, Context *context);
 
-    void create_index(const std::string &tab_name, const std::vector<std::string> &col_names, Context *context);
+    void create_index(std::string &tab_name, std::vector<std::string> &col_names, Context *context);
 
     void drop_index(const std::string &tab_name, const std::vector<std::string> &col_names, Context *context);
 
     void drop_index(const std::string &tab_name, const std::vector<ColMeta> &col_names, Context *context);
+
+    void redo_index(const std::string &tab_name, TabMeta& table_meta, const std::vector<std::string> &col_names, const std::string &index_name, Context *context);
 };

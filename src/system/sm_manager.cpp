@@ -11,7 +11,7 @@ See the Mulan PSL v2 for more details. */
 #include "sm_manager.h"
 
 #include <sys/stat.h>
-#include <unistd.h>
+#include <unistd.h> 
 
 #include <fstream>
 
@@ -122,7 +122,7 @@ void SmManager::open_db(const std::string &db_name) {
  */
 void SmManager::flush_meta() {
     // 默认清空文件
-    std::ofstream ofs(DB_META_NAME);
+    std::ofstream ofs(DB_META_NAME, std::ios::trunc);
     ofs << db_;
 }
 
@@ -182,6 +182,10 @@ void SmManager::show_tables(Context *context) {
  * @param {String} table_name {Context*} context
  */
 void SmManager::show_indexs(std::string &table_name, Context *context) {
+    if (!db_.is_table(table_name)) {
+        throw TableNotFoundError(table_name);
+    }
+
     std::ofstream outfile("output.txt", std::ios::out | std::ios::app);
     RecordPrinter printer(3);
     std::vector<std::string> rec_str{table_name, "unique", ""};
@@ -189,11 +193,11 @@ void SmManager::show_indexs(std::string &table_name, Context *context) {
 
     std::ostringstream cols_stream;
     for (const auto &[_, index]: db_.tabs_[table_name].indexes) {
-        cols_stream << "(" << index.cols[0].name;
-        outfile << format << index.cols[0].name;
+        cols_stream << "(" << index.cols[0].second.name;
+        outfile << format << index.cols[0].second.name;
         for (size_t i = 1; i < index.cols.size(); ++i) {
-            cols_stream << "," << index.cols[i].name;
-            outfile << "," << index.cols[i].name;
+            cols_stream << "," << index.cols[i].second.name;
+            outfile << "," << index.cols[i].second.name;
         }
         outfile << ") |\n";
         cols_stream << ")";
@@ -260,6 +264,11 @@ void SmManager::create_table(const std::string &tab_name, const std::vector<ColD
     fhs_.emplace(tab_name, rm_manager_->open_file(tab_name));
 
     flush_meta();
+
+    // 表级 X 锁
+    if (context != nullptr) {
+        context->lock_mgr_->lock_exclusive_on_table(context->txn_, fhs_[tab_name]->GetFd());
+    }
 }
 
 /**
@@ -272,9 +281,23 @@ void SmManager::drop_table(const std::string &tab_name, Context *context) {
         throw TableNotFoundError(tab_name);
     }
 
-    // 先关闭再删除文件
+    // 表级 X 锁
+    if (context != nullptr) {
+        context->lock_mgr_->lock_exclusive_on_table(context->txn_, fhs_[tab_name]->GetFd());
+    }
+
+    auto &tab_meta = db_.get_table(tab_name);
+
+    // 先关闭再删除表文件
     rm_manager_->close_file(fhs_[tab_name].get());
     rm_manager_->destroy_file(tab_name);
+
+    // 先关闭再删除索引文件
+    for (auto &[index_name, index_meta]: tab_meta.indexes) {
+        ix_manager_->close_index(ihs_[index_name].get());
+        ix_manager_->destroy_index(index_name);
+        ihs_.erase(index_name);
+    }
 
     fhs_.erase(tab_name);
     db_.tabs_.erase(tab_name);
@@ -288,13 +311,20 @@ void SmManager::drop_table(const std::string &tab_name, Context *context) {
  * @param {vector<string>&} col_names 索引包含的字段名称
  * @param {Context*} context
  */
-void SmManager::create_index(const std::string &tab_name, const std::vector<std::string> &col_names, Context *context) {
+void SmManager::create_index(std::string &tab_name, std::vector<std::string> &col_names, Context *context) {
     auto &&ix_name = ix_manager_->get_index_name(tab_name, col_names);
     if (disk_manager_->is_file(ix_name)) {
         throw IndexExistsError(tab_name, col_names);
     }
 
+    // 异常情况检查放前面
     auto &table_meta = db_.get_table(tab_name);
+
+    // 表级 S 锁
+    // 建立索引要读表上的所有记录，所以申请表级读锁
+    if (context != nullptr && context->lock_mgr_ != nullptr) {
+        context->lock_mgr_->lock_shared_on_table(context->txn_, fhs_[tab_name]->GetFd());
+    }
 
     std::vector<ColMeta> col_metas;
     col_metas.reserve(col_names.size());
@@ -334,9 +364,10 @@ void SmManager::create_index(const std::string &tab_name, const std::vector<std:
     delete []key;
 
     // 更新表元索引数据
-    table_meta.indexes.emplace(ix_name, IndexMeta{tab_name, total_len, static_cast<int>(col_names.size()), col_metas});
+    table_meta.indexes.emplace(ix_name, IndexMeta(std::move(tab_name), total_len, static_cast<int>(col_names.size()),
+                                                  std::move(col_metas)));
     // 插入索引句柄
-    ihs_[ix_name] = std::move(ih);
+    ihs_[std::move(ix_name)] = std::move(ih);
     // 持久化
     flush_meta();
 }
@@ -352,6 +383,12 @@ void SmManager::drop_index(const std::string &tab_name, const std::vector<std::s
     auto &&ix_name = ix_manager_->get_index_name(tab_name, col_names);
     if (!disk_manager_->is_file(ix_name)) {
         throw IndexNotFoundError(tab_name, col_names);
+    }
+
+    // 表级 S 锁
+    // 删除索引时只允许对表读操作，写操作可能会误写将被删除的索引，所以申请表级读锁
+    if (context != nullptr) {
+        context->lock_mgr_->lock_shared_on_table(context->txn_, fhs_[tab_name]->GetFd());
     }
 
     ix_manager_->close_index(ihs_[ix_name].get());
@@ -380,10 +417,68 @@ void SmManager::drop_index(const std::string &tab_name, const std::vector<ColMet
         throw IndexNotFoundError(tab_name, col_names);
     }
 
+    // 表级 S 锁
+    // 删除索引时只允许对表读操作，写操作可能会误写将被删除的索引，所以申请表级读锁
+    if (context != nullptr) {
+        context->lock_mgr_->lock_shared_on_table(context->txn_, fhs_[tab_name]->GetFd());
+    }
+
     ix_manager_->close_index(ihs_[ix_name].get());
     ix_manager_->destroy_index(ix_name);
     ihs_.erase(ix_name);
     table_meta.indexes.erase(ix_name);
     // 持久化
     flush_meta();
+}
+
+/**
+ * @description: 仅用于恢复索引
+ * @param {string&} tab_name 表名称
+ * @param {vector<ColMeta>&} 索引包含的字段元数据
+ * @param {Context*} context
+ */
+void SmManager::redo_index(const std::string &tab_name, TabMeta &table_meta, const std::vector<std::string> &col_names,
+                           const std::string &index_name, Context *context) {
+    ix_manager_->close_index(ihs_[index_name].get());
+    ix_manager_->destroy_index(index_name);
+
+    std::vector<ColMeta> col_metas;
+    col_metas.reserve(col_names.size());
+    auto total_len = 0;
+    for (auto &col_name: col_names) {
+        col_metas.emplace_back(*table_meta.get_col(col_name));
+        total_len += col_metas.back().len;
+    }
+
+    // auto ix_name = std::move(ix_manager_->get_index_name(tab_name, col_names));
+    ix_manager_->create_index(index_name, col_metas);
+    auto &&ih = ix_manager_->open_index(index_name);
+    auto &&fh = fhs_[tab_name];
+
+    int offset = 0;
+    char *key = new char[total_len];
+    for (auto &&scan = std::make_unique<RmScan>(fh.get()); !scan->is_end(); scan->next()) {
+        auto &&rid = scan->rid();
+        auto &&record = fh->get_record(rid, context);
+        offset = 0;
+        for (auto &col_meta: col_metas) {
+            memcpy(key + offset, record->data + col_meta.offset, col_meta.len);
+            offset += col_meta.len;
+        }
+        // 插入B+树
+        if (ih->insert_entry(key, rid, context->txn_) == IX_NO_PAGE) {
+            // 释放内存
+            delete []key;
+            // 重复了
+            ix_manager_->close_index(ih.get());
+            ix_manager_->destroy_index(index_name);
+            // drop_index(tab_name, col_names, context);
+            throw NonUniqueIndexError(tab_name, col_names);
+        }
+    }
+    // 释放内存
+    delete []key;
+
+    // 插入索引句柄
+    ihs_[index_name] = std::move(ih);
 }

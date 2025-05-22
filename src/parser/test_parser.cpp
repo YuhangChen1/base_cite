@@ -41,7 +41,39 @@ int main() {
         "select id,MAX(score) as max_score from grade group by id, course having v1 > 0;", // 需要手动检查
         "select id, MAX(score) as max_score from grade where MAX(score) > 90 group by id;" // 语法分析报错时抛出即可
     };
-    for (auto &sql: aggSqls) {
+    std::vector<std::string> subquerySqls = {
+        // 为了减少编写词法规则工作量，在分析阶段判断非法 sqls
+        "select id from grade where score = (select MAX(score) from grade);",
+        "select id from grade where score > (select score from grade);",
+        "select id from grade where score < (select MAX(score) from grade);",
+        "select id from grade where score = (select MIN(score) from grade where score > (select MAX(score) from grade));",
+        // 多级嵌套
+        "select id from grade where name in (select name from grade);",
+        "select id from grade where score = (select MIN(score) from grade where score in (select MAX(score) from grade));"
+    };
+    std::vector<std::string> constValueSubquerySqls = {
+        // 为了减少编写词法规则工作量，在分析阶段判断非法 sqls
+        "select id from grade where score = (1);",
+        "select id from grade where score > (4);",
+        "select id from grade where score < (7, 8.0, '9');",
+        "select id from grade where score >= (999.0);", // 多级嵌套
+        "select id from grade where name in (1, 3.45, '4');"
+    };
+    std::vector<std::string> PerformanceSqls = {
+        // 为了减少编写词法规则工作量，在分析阶段判断非法 sqls
+        "load ../../src/test/performance_test/table_data/warehouse.csv into warehouse;",
+        "load ../../src/test/performance_test/table_data/city.csv into city;",
+        "load ../../src/test/performance_test/table_data/city.csv into orders;",
+        "load ../my.csv into your;",
+        "set output_file off",
+        "set output_file on"
+    };
+    std::vector<std::string> DatetimeSqls = {
+        // 为了减少编写词法规则工作量，在分析阶段判断非法 sqls
+        "create table t(id int , time datetime);",
+        "insert into t values(1, '2023-05-18 09:12:19');"
+    };
+    for (auto &sql: DatetimeSqls) {
         std::cout << sql << std::endl;
         YY_BUFFER_STATE buf = yy_scan_string(sql.c_str());
         assert(yyparse() == 0);

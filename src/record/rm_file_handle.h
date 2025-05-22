@@ -19,6 +19,7 @@ See the Mulan PSL v2 for more details. */
 #include "rm_defs.h"
 
 class RmManager;
+class LoadExecutor;
 
 /* 对表数据文件中的页面进行封装 */
 struct RmPageHandle {
@@ -44,6 +45,7 @@ struct RmPageHandle {
 class RmFileHandle {
     friend class RmScan;
     friend class RmManager;
+    friend class LoadExecutor;
 
 private:
     DiskManager *disk_manager_;
@@ -73,6 +75,8 @@ public:
 
     std::unique_ptr<RmRecord> get_record(const Rid &rid, Context *context) const;
 
+    void load_record(int &page_no, char *&data, int nums_record, int page_size);
+    
     Rid insert_record(char *buf, Context *context);
 
     void insert_record(const Rid &rid, char *buf);

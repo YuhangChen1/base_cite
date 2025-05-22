@@ -18,6 +18,7 @@ See the Mulan PSL v2 for more details. */
 #include "executor_seq_scan.h"
 #include "executor_update.h"
 #include "executor_sortmerge_join.h"
+#include "execution/executor_load.h"
 #include "index/ix.h"
 #include "record_printer.h"
 
@@ -117,6 +118,10 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
         }
     } else if (auto x = std::dynamic_pointer_cast<SetKnobPlan>(plan)) {
         switch (x->set_knob_type_) {
+            case ast::SetKnobType::EnableOutputFile: {
+                planner_->enable_output_file = x->bool_value_;
+                break;
+            }
             case ast::SetKnobType::EnableNestLoop: {
                 planner_->set_enable_nestedloop_join(x->bool_value_);
                 break;
@@ -129,6 +134,45 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                 throw RMDBError("Not implemented!\n");
             }
         }
+    } else if (auto x = std::dynamic_pointer_cast<StaticCheckpointPlan>(plan)) {
+        // TODO 这里静态检查点作了优化，直接把检查点之前的日志清空，这样有检查点地址一定是日志文件头，且是最后一个检查点
+        // 先提交了再刷盘
+        // 1.停止接收新事务和正在运行事务
+        // 2.将仍保留在日志缓冲区中的内容写到日志文件中
+        // 如果是隐式事务执行，这里设置为显式，这样就不会多写一条 commit log，保证日志纯净
+        context->txn_->set_txn_mode(true);
+        context->txn_ = txn_mgr_->get_transaction(*txn_id);
+        txn_mgr_->commit(context->txn_, context->log_mgr_);
+
+        // 3.在日志文件中写入一个“检查点记录” 忽略
+        // auto *static_checkpoint_log_record = new StaticCheckpointLogRecord(context->txn_->get_transaction_id());
+        // static_checkpoint_log_record->prev_lsn_ = context->txn_->get_prev_lsn();
+        // context->txn_->set_prev_lsn(context->log_mgr_->add_log_to_buffer(static_checkpoint_log_record));
+        // log_manager->flush_log_to_disk();
+
+        // 4.将当前数据库缓冲区中的内容写到磁盘中
+        sm_manager_->flush_meta();
+
+        for (auto &[_, fh]: sm_manager_->fhs_) {
+            sm_manager_->get_rm_manager()->flush_file(fh.get());
+        }
+        for (auto &[_, ih]: sm_manager_->ihs_) {
+            sm_manager_->get_ix_manager()->flush_index(ih.get());
+        }
+        // 直接把日志清空
+        // 如果日志文件已经开启，先关闭
+        auto disk_manager = sm_manager_->get_disk_manager();
+        auto log_fd = disk_manager->GetLogFd();
+        if (log_fd != -1) {
+            disk_manager->close_file(log_fd);
+            sm_manager_->get_disk_manager()->SetLogFd(-1);
+        }
+
+        std::ofstream ofs(LOG_FILE_NAME, std::ios::trunc);
+        ofs.close();
+
+        exit(1);
+        // 5.把日志文件中检查点记录的地址写到“重新启动文件”中 忽略
     }
 }
 
@@ -148,12 +192,14 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
     rec_printer.print_separator(context);
     // print header into file
     std::fstream outfile;
-    outfile.open("output.txt", std::ios::out | std::ios::app);
-    outfile << "|";
-    for (int i = 0; i < captions.size(); ++i) {
-        outfile << " " << captions[i] << " |";
+    if (planner_->enable_output_file) {
+        outfile.open("output.txt", std::ios::out | std::ios::app);
+        outfile << "|";
+        for (int i = 0; i < captions.size(); ++i) {
+            outfile << " " << captions[i] << " |";
+        }
+        outfile << "\n";
     }
-    outfile << "\n";
 
     // Print records
     size_t num_rec = 0;
@@ -177,11 +223,13 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
         // print record into buffer
         rec_printer.print_record(columns, context);
         // print record into file
-        outfile << "|";
-        for (int i = 0; i < columns.size(); ++i) {
-            outfile << " " << columns[i] << " |";
+        if (planner_->enable_output_file) {
+            outfile << "|";
+            for (int i = 0; i < columns.size(); ++i) {
+                outfile << " " << columns[i] << " |";
+            }
+            outfile << "\n";
         }
-        outfile << "\n";
         num_rec++;
     }
     outfile.close();

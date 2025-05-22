@@ -35,7 +35,12 @@ public:
         }
         fh_ = sm_manager_->fhs_.at(tab_name).get();
         context_ = context;
-    };
+
+        // IX 锁
+        // if (context_ != nullptr) {
+        //     context_->lock_mgr_->lock_IX_on_table(context_->txn_, fh_->GetFd());
+        // }
+    }
 
     std::unique_ptr<RmRecord> Next() override {
         // Make record buffer
@@ -55,12 +60,10 @@ public:
         // 先检查 key 是否是 unique
         for (auto &[index_name, index]: tab_.indexes) {
             auto ih = sm_manager_->ihs_.at(index_name).get();
-            int offset = 0;
             // TODO 优化 放到容器中
             char *key = new char[index.col_tot_len];
-            for (size_t i = 0; i < index.col_num; ++i) {
-                memcpy(key + offset, rec.data + index.cols[i].offset, index.cols[i].len);
-                offset += index.cols[i].len;
+            for (auto &[index_offset, col_meta]: index.cols) {
+                memcpy(key + index_offset, rec.data + col_meta.offset, col_meta.len);
             }
             Rid unique_rid{};
             if (!ih->is_unique(key, unique_rid, context_->txn_)) {
@@ -70,17 +73,38 @@ public:
             delete []key;
         }
 
+        // 再检查是否有间隙锁
+        for (auto &[index_name, index]: tab_.indexes) {
+            auto ih = sm_manager_->ihs_.at(index_name).get();
+            RmRecord rm_record(index.col_tot_len);
+            for (auto &[index_offset, col_meta]: index.cols) {
+                memcpy(rm_record.data + index_offset, rec.data + col_meta.offset, col_meta.len);
+            }
+            context_->lock_mgr_->isSafeInGap(context_->txn_, index, rm_record);
+        }
+
         // Insert into record file
         rid_ = fh_->insert_record(rec.data, context_);
+
+        auto *insert_log_record = new InsertLogRecord(context_->txn_->get_transaction_id(), rec, rid_, tab_name_);
+        insert_log_record->prev_lsn_ = context_->txn_->get_prev_lsn();
+        context_->txn_->set_prev_lsn(context_->log_mgr_->add_log_to_buffer(insert_log_record));
+        auto &&page = fh_->fetch_page_handle(rid_.page_no).page;
+        page->set_page_lsn(context_->txn_->get_prev_lsn());
+        sm_manager_->get_bpm()->unpin_page(page->get_page_id(), true);
+        delete insert_log_record;
+
+        // 写入事务写集
+        // may std::unique_ptr 优化，避免拷贝多次记录
+        auto *write_record = new WriteRecord(WType::INSERT_TUPLE, rid_, rec, tab_name_);
+        context_->txn_->append_write_record(write_record);
 
         // Unique Index -> Insert into index
         for (auto &[index_name, index]: tab_.indexes) {
             auto ih = sm_manager_->ihs_.at(index_name).get();
             char *key = new char[index.col_tot_len];
-            int offset = 0;
-            for (size_t i = 0; i < index.col_num; ++i) {
-                memcpy(key + offset, rec.data + index.cols[i].offset, index.cols[i].len);
-                offset += index.cols[i].len;
+            for (auto &[index_offset, col_meta]: index.cols) {
+                memcpy(key + index_offset, rec.data + col_meta.offset, col_meta.len);
             }
             ih->insert_entry(key, rid_, context_->txn_);
             delete []key;

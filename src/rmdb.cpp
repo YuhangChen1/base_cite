@@ -31,7 +31,8 @@ static bool should_exit = false;
 
 // 构建全局所需的管理器对象
 auto disk_manager = std::make_unique<DiskManager>();
-auto buffer_pool_manager = std::make_unique<BufferPoolManager>(BUFFER_POOL_SIZE, disk_manager.get());
+auto log_manager = std::make_unique<LogManager>(disk_manager.get());
+auto buffer_pool_manager = std::make_unique<BufferPoolManager>(BUFFER_POOL_SIZE, disk_manager.get(), log_manager.get());
 auto rm_manager = std::make_unique<RmManager>(disk_manager.get(), buffer_pool_manager.get());
 auto ix_manager = std::make_unique<IxManager>(disk_manager.get(), buffer_pool_manager.get());
 auto sm_manager = std::make_unique<SmManager>(disk_manager.get(), buffer_pool_manager.get(), rm_manager.get(),
@@ -41,8 +42,8 @@ auto txn_manager = std::make_unique<TransactionManager>(lock_manager.get(), sm_m
 auto planner = std::make_unique<Planner>(sm_manager.get());
 auto optimizer = std::make_unique<Optimizer>(sm_manager.get(), planner.get());
 auto ql_manager = std::make_unique<QlManager>(sm_manager.get(), txn_manager.get(), planner.get());
-auto log_manager = std::make_unique<LogManager>(disk_manager.get());
-auto recovery = std::make_unique<RecoveryManager>(disk_manager.get(), buffer_pool_manager.get(), sm_manager.get());
+auto recovery = std::make_unique<RecoveryManager>(disk_manager.get(), buffer_pool_manager.get(), sm_manager.get(),
+                                                  log_manager.get(), txn_manager.get());
 auto portal = std::make_unique<Portal>(sm_manager.get());
 auto analyze = std::make_unique<Analyze>(sm_manager.get());
 pthread_mutex_t *buffer_mutex;
@@ -70,6 +71,7 @@ void SetTransaction(txn_id_t *txn_id, Context *context) {
 
 void *client_handler(void *sock_fd) {
     int fd = *((int *) sock_fd);
+    free(sock_fd);
     pthread_mutex_unlock(sockfd_mutex);
 
     int i_recvBytes;
@@ -95,6 +97,7 @@ void *client_handler(void *sock_fd) {
             std::cout << "Maybe the client has closed" << std::endl;
             break;
         }
+
         if (i_recvBytes == -1) {
             std::cout << "Client read error!" << std::endl;
             break;
@@ -106,8 +109,13 @@ void *client_handler(void *sock_fd) {
             std::cout << "Client exit." << std::endl;
             break;
         }
+
         if (strcmp(data_recv, "crash") == 0) {
             std::cout << "Server crash" << std::endl;
+            delete []data_send;
+            for (auto &[_, txn]: txn_manager->txn_map) {
+                delete txn;
+            }
             exit(1);
         }
 
@@ -118,7 +126,7 @@ void *client_handler(void *sock_fd) {
 
         // 开启事务，初始化系统所需的上下文信息（包括事务对象指针、锁管理器指针、日志管理器指针、存放结果的buffer、记录结果长度的变量）
         Context *context = new Context(lock_manager.get(), log_manager.get(), nullptr, data_send, &offset);
-        // SetTransaction(&txn_id, context);
+        SetTransaction(&txn_id, context);
 
         // 用于判断是否已经调用了yy_delete_buffer来删除buf
         bool finish_analyze = false;
@@ -149,10 +157,12 @@ void *client_handler(void *sock_fd) {
                     txn_manager->abort(context->txn_, log_manager.get());
                     std::cout << e.GetInfo() << std::endl;
 
-                    std::fstream outfile;
-                    outfile.open("output.txt", std::ios::out | std::ios::app);
-                    outfile << str;
-                    outfile.close();
+                    if (planner->enable_output_file) {
+                        std::fstream outfile;
+                        outfile.open("output.txt", std::ios::out | std::ios::app);
+                        outfile << str;
+                        outfile.close();
+                    }
                 } catch (RMDBError &e) {
                     // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
                     std::cerr << e.what() << std::endl;
@@ -163,27 +173,31 @@ void *client_handler(void *sock_fd) {
                     offset = e.get_msg_len() + 1;
 
                     // 将报错信息写入output.txt
-                    std::fstream outfile;
-                    outfile.open("output.txt", std::ios::out | std::ios::app);
-                    outfile << "failure\n";
-                    outfile.close();
+                    if (planner->enable_output_file) {
+                        std::fstream outfile;
+                        outfile.open("output.txt", std::ios::out | std::ios::app);
+                        outfile << "failure\n";
+                        outfile.close();
+                    }
                 }
             }
         } else {
             // 遇到异常，需要打印failure到output.txt文件中，并发异常信息返回给客户端
-            std::string str = "语法层解析错误";
-            std::cerr << str << std::endl;
+            // std::string str = "语法层解析错误";
+            // std::cerr << str << std::endl;
 
-            memcpy(data_send, str.c_str(), str.size());
-            data_send[str.size()] = '\n';
-            data_send[str.size() + 1] = '\0';
-            offset = str.size() + 1;
+            // memcpy(data_send, str.c_str(), str.size());
+            // data_send[str.size()] = '\n';
+            // data_send[str.size() + 1] = '\0';
+            // offset = str.size() + 1;
 
             // 将报错信息写入output.txt
-            std::fstream outfile;
-            outfile.open("output.txt", std::ios::out | std::ios::app);
-            outfile << "failure\n";
-            outfile.close();
+            if (planner->enable_output_file) {
+                std::fstream outfile;
+                outfile.open("output.txt", std::ios::out | std::ios::app);
+                outfile << "failure\n";
+                outfile.close();
+            }
         }
         if (finish_analyze == false) {
             yy_delete_buffer(buf);
@@ -195,11 +209,14 @@ void *client_handler(void *sock_fd) {
             break;
         }
         // 如果是单挑语句，需要按照一个完整的事务来执行，所以执行完当前语句后，自动提交事务
-        // if(context->txn_->get_txn_mode() == false)
-        // {
-        //     txn_manager->commit(context->txn_, context->log_mgr_);
-        // }
+        if (context->txn_->get_txn_mode() == false) {
+            txn_manager->commit(context->txn_, context->log_mgr_);
+        }
+        delete context;
     }
+
+    // release memory
+    delete []data_send;
 
     // Clear
     std::cout << "Terminating current client_connection..." << std::endl;
@@ -243,25 +260,31 @@ void start_server() {
 
     while (!should_exit) {
         std::cout << "Waiting for new connection..." << std::endl;
+        // 解决局部变量析构问题
+        int *sockfd = (int *) malloc(sizeof(int));
+
         pthread_t thread_id;
         struct sockaddr_in s_addr_client{};
         int client_length = sizeof(s_addr_client);
 
         if (setjmp(jmpbuf)) {
+            free(sockfd);
             std::cout << "Break from Server Listen Loop\n";
             break;
         }
 
         // Block here. Until server accepts a new connection.
         pthread_mutex_lock(sockfd_mutex);
-        int sockfd = accept(sockfd_server, (struct sockaddr *) (&s_addr_client), (socklen_t *) (&client_length));
-        if (sockfd == -1) {
+        *sockfd = accept(sockfd_server, (struct sockaddr *) (&s_addr_client), (socklen_t *) (&client_length));
+        if (*sockfd == -1) {
+            free(sockfd);
             std::cout << "Accept error!" << std::endl;
             continue; // ignore current socket ,continue while loop.
         }
 
         // 和客户端建立连接，并开启一个线程负责处理客户端请求
-        if (pthread_create(&thread_id, nullptr, &client_handler, (void *) (&sockfd)) != 0) {
+        if (pthread_create(&thread_id, nullptr, &client_handler, (void *) (sockfd)) != 0) {
+            free(sockfd);
             std::cout << "Create thread fail!" << std::endl;
             break; // break while loop
         }
@@ -273,6 +296,11 @@ void start_server() {
     if (ret == -1) { printf("%s\n", strerror(errno)); }
     //    assert(ret != -1);
     sm_manager->close_db();
+
+    for (auto &[_, txn]: txn_manager->txn_map) {
+        delete txn;
+    }
+
     std::cout << " DB has been closed.\n";
     std::cout << "Server shuts down." << std::endl;
 }
